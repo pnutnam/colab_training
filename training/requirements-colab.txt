@@ -1,0 +1,9 @@
+# Pinned-on-Colab training dependencies (installed on the VM by train_sft.py).
+# torch is preinstalled on Colab VMs — do not list it here.
+transformers>=4.55,<5
+datasets>=3.0,<4
+accelerate>=1.0
+peft>=0.14
+bitsandbytes>=0.45
+sentencepiece>=0.2
+hf_transfer>=0.1.8

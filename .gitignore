@@ -1,0 +1,32 @@
+# secrets / local config
+.env
+*.token
+*_credentials.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+
+# artifacts
+runs/
+artifacts/
+data/
+*.gguf
+*.safetensors
+*.bin
+*.adapter/
+
+# generated launch composites
+/tmp/colab-train-*.py
+
+# HF cache if redirected here
+hf-cache/
+
+# editors / os
+.idea/
+.vscode/
+.DS_Store
