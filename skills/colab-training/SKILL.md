@@ -108,7 +108,7 @@ incrementally, don't re-import):
 
 ```bash
 colab --auth adc new -s train1 --gpu L4
-colab --auth adc install -s train1 -r training/requirements-colab.txt
+colab --auth adc install -s train1 transformers datasets accelerate peft bitsandbytes sentencepiece hf_transfer
 echo "import torch; print(torch.cuda.get_device_name(0))" | colab --auth adc exec -s train1
 colab --auth adc exec -s train1 -f some_script.py
 colab --auth adc status -s train1      # monitor
