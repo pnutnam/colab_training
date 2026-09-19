@@ -58,12 +58,21 @@ def cuda_check():
 
 check("GPU + CUDA", cuda_check)
 
-check(
-    "hf_hub import",
-    lambda: __import__("huggingface_hub").__version__ or subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"], check=True
-    ),
-)
+def hf_hub_check():
+    try:
+        import huggingface_hub
+
+        return huggingface_hub.__version__
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"], check=True
+        )
+        import huggingface_hub
+
+        return f"installed {huggingface_hub.__version__}"
+
+
+check("hf_hub", hf_hub_check)
 
 if FAILED:
     print(f"\nSMOKE TEST FAILED: {FAILED}", file=sys.stderr)

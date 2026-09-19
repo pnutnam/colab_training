@@ -21,8 +21,8 @@ import subprocess
 import sys
 import time
 
-# Keep in sync with training/requirements-colab.txt (this script runs standalone
-# on the VM, so the list is embedded rather than read from a file).
+# Keep this list as the single source of VM-side deps (there is no separate
+# requirements file — this script is what gets sent to the VM).
 DEPS = [
     "transformers>=4.55,<5",
     "datasets>=3.0,<4",
@@ -30,12 +30,14 @@ DEPS = [
     "peft>=0.14",
     "bitsandbytes>=0.45",
     "sentencepiece>=0.2",
+    "hf_transfer>=0.1.8",
 ]
 
 
 def ensure_deps() -> None:
     if os.environ.get("SKIP_DEPS") == "1":
         return
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"  # ~2-3x faster model pulls
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-q", *DEPS],
         check=True,
@@ -67,6 +69,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--public-repo", action="store_true", help="Create OUTPUT_REPO as public (default: private)"
     )
+    p.add_argument(
+        "--save-steps",
+        type=int,
+        default=int(env("SAVE_STEPS", "250")),
+        help="Checkpoint every N steps; each checkpoint is pushed to OUTPUT_REPO "
+        "so a preempted run can be resumed",
+    )
+    p.add_argument(
+        "--resume-from",
+        default=env("RESUME_FROM", ""),
+        help="Checkpoint name in OUTPUT_REPO to resume from, e.g. checkpoint-500",
+    )
     return p.parse_args()
 
 
@@ -88,14 +102,36 @@ def main() -> None:
         AutoTokenizer,
         DataCollatorForLanguageModeling,
         Trainer,
+        TrainerCallback,
         TrainingArguments,
     )
+
+    class PushCheckpoints(TrainerCallback):
+        """Upload each checkpoint to OUTPUT_REPO so preemptions are resumable."""
+
+        def __init__(self, repo_id: str, out_dir: str):
+            self.repo_id, self.out_dir = repo_id, out_dir
+
+        def on_save(self, args, state, control, **kwargs):
+            ckpt = f"{self.out_dir}/checkpoint-{state.global_step}"
+            if os.path.isdir(ckpt):
+                HfApi().upload_folder(
+                    repo_id=self.repo_id,
+                    folder_path=ckpt,
+                    path_in_repo=f"checkpoints/checkpoint-{state.global_step}",
+                    commit_message=f"checkpoint {state.global_step}",
+                )
+                print(f"[train] pushed checkpoint-{state.global_step} to {self.repo_id}")
 
     started = time.time()
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
     bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
     print(f"[train] device={device_name} bf16={bf16}")
     print(f"[train] base={args.base_model} dataset={args.dataset} out={args.output_repo}")
+
+    # Create the output repo up front — checkpoints push to it mid-run.
+    if args.output_repo:
+        HfApi().create_repo(args.output_repo, exist_ok=True, private=not args.public_repo)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     if tokenizer.pad_token is None:
@@ -135,11 +171,11 @@ def main() -> None:
     if args.dataset_config:
         ds_kwargs["name"] = args.dataset_config
     dataset = load_dataset(**ds_kwargs)
-    split = "train" if "train" in dataset else list(dataset.keys())[0]
+    split = "train" if "train" in dataset else next(iter(dataset.keys()))
     dataset = dataset[split]
 
     def to_text(example):
-        if "messages" in example and example["messages"]:
+        if example.get("messages"):
             if getattr(tokenizer, "chat_template", None):
                 return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
             return {"text": "\n".join(m["content"] for m in example["messages"])}
@@ -162,10 +198,14 @@ def main() -> None:
     # ---- train ------------------------------------------------------------
     use_wandb = bool(os.environ.get("WANDB_API_KEY"))
     out_dir = "/content/outputs"
+    callbacks = []
+    if args.output_repo:
+        callbacks.append(PushCheckpoints(args.output_repo, out_dir))
     trainer = Trainer(
         model=model,
         train_dataset=tokenized,
         data_collator=collator,
+        callbacks=callbacks,
         args=TrainingArguments(
             output_dir=out_dir,
             num_train_epochs=args.epochs,
@@ -177,7 +217,7 @@ def main() -> None:
             warmup_ratio=0.03,
             logging_steps=10,
             save_strategy="steps",
-            save_steps=500,
+            save_steps=args.save_steps,
             save_total_limit=2,
             bf16=bf16,
             gradient_checkpointing=not args.full,
@@ -186,7 +226,19 @@ def main() -> None:
             seed=42,
         ),
     )
-    trainer.train()
+    if args.resume_from:
+        from huggingface_hub import snapshot_download
+
+        local = snapshot_download(
+            args.output_repo,
+            allow_patterns=f"checkpoints/{args.resume_from}/**",
+            local_dir="/content/resume",
+        )
+        ckpt_dir = f"{local}/checkpoints/{args.resume_from}"
+        print(f"[train] resuming from {ckpt_dir}")
+        trainer.train(resume_from_checkpoint=ckpt_dir)
+    else:
+        trainer.train()
     metrics = trainer.state.log_history[-1]
 
     # ---- save + push ------------------------------------------------------
@@ -194,13 +246,14 @@ def main() -> None:
     model.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
 
+    method = "Full fine-tune" if args.full else "QLoRA adapter"
     card = (
         "---\n"
         f"base_model: {args.base_model}\n"
         "library_name: peft\n"
         "---\n\n"
         f"# {args.output_repo or 'adapter'}\n\n"
-        f"QLoRA adapter trained on Colab ({device_name}).\n\n"
+        f"{method} trained on Colab ({device_name}).\n\n"
         f"- Base model: `{args.base_model}`\n"
         f"- Dataset: `{args.dataset}`\n"
         f"- Epochs: {args.epochs} | LR: {args.lr} | max_length: {args.max_length}\n"

@@ -5,9 +5,8 @@ description = "Agentic off-machine LLM training: Google Colab GPUs + Hugging Fac
 requires-python = ">=3.12"
 dependencies = [
     # Local orchestration only — heavy training deps live on the Colab VM
-    # (see training/requirements-colab.txt).
+    # (embedded in training/train_sft.py DEPS).
     "huggingface_hub>=1.0",
-    "datasets>=3.0",
 ]
 
 [dependency-groups]

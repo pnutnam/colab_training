@@ -92,6 +92,11 @@ Config knobs (model, epochs, LR, batch, GPU tier, timeout) all live in
 Default script does 4-bit QLoRA; `TRAIN_ARGS="--full" make train` does full
 fine-tuning if the GPU is big enough.
 
+Long runs survive preemption: checkpoints push to `OUTPUT_REPO` every
+`SAVE_STEPS` (default 250). If a runtime dies mid-training, relaunch with
+`TRAIN_ARGS="--resume-from checkpoint-500" make train` (checkpoint name from
+your output repo's `checkpoints/` folder).
+
 ## Multiple Google accounts (parallel runs)
 
 Each Colab account gets its own credentials + isolated session state, so you
@@ -124,10 +129,11 @@ hf download yourname/your-adapter --local-dir runs/   # pull artifacts locally
 ## Agent integration
 
 Skills are installed machine-wide by `make setup` (`make skills-install` to
-re-sync): **`colab-training`** (the full runbook: pre-flight → launch →
-monitor → push → teardown, failure playbook, multi-account rotation),
-**`colab-cli`** (Google's official skill), **`hf-cli`** (HF's official skill) —
-into `~/.zcode/skills`, `~/.agents/skills`, and `~/.claude/skills`. MCP
+re-sync after clone or skill edits): **`colab-training`** (the full runbook:
+pre-flight → launch → monitor → push → teardown, failure playbook,
+multi-account rotation), **`colab-cli`** (Google's official skill),
+**`hf-cli`** (HF's official skill) — into `~/.zcode/skills`,
+`~/.agents/skills`, and `~/.claude/skills`. MCP
 servers (`huggingface`, `colab-mcp`) are configured in
 [`.mcp.json`](.mcp.json). `hf` auto-detects agent callers; nearly every
 subcommand has `--json`.
@@ -154,6 +160,8 @@ training/train_sft.py      self-contained QLoRA/SFT trainer that runs ON the VM
 skills/colab-training/     canonical agent skill (installed to all agent dirs)
 runs/                      local artifacts + runlog (gitignored)
 ```
+
+MIT licensed — see [LICENSE](LICENSE).
 
 ## Disclaimer
 

@@ -20,6 +20,9 @@ data/
 *.bin
 *.adapter/
 
+# generated skill copies (source of truth: skills/, installer: make skills-install)
+.agents/skills/
+
 # generated launch composites
 /tmp/colab-train-*.py
 
