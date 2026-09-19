@@ -1,174 +1,164 @@
 # colab_training
 
 Agentic, off-machine LLM training: **open models from Hugging Face, trained on
-Google Colab GPUs** (via your Colab Pro subscription), driven entirely from
-this machine — by you or by an AI agent (ZCode skills + MCP servers included).
+Google Colab GPUs**, driven entirely from your terminal — by you or by an AI
+agent (ZCode/Claude Code/Codex skills + MCP servers included).
 
 ```
 ┌──────────────── this machine ────────────────┐
-│  ZCode agent (skills: colab-training,       │
+│  AI agent (skills: colab-training,          │
 │   colab-cli, hf-cli; MCP: huggingface,      │
 │   colab-mcp)  +  hf / colab CLIs            │
 └──────────┬─────────────────────┬────────────┘
            │ models + datasets   │ `colab run --gpu T4 train.py`
            ▼ in, adapters out    ▼
-     Hugging Face Hub        Colab Pro VM (T4/L4/G4/H100/A100)
+     Hugging Face Hub        Colab runtime (T4/L4/G4/A100)
 ```
 
-Heavy artifacts never touch this machine's disk: base models and datasets are
+Heavy artifacts never touch your machine's disk: base models and datasets are
 pulled from the Hub **on the VM**, and trained adapters are pushed **to the
-Hub** before the VM is torn down.
+Hub** before the VM is torn down. Your laptop stays a control plane.
 
-## What's installed
+## What this actually leverages
 
-| Piece | Where | Purpose |
+| Piece | What it is | What it costs you |
 | --- | --- | --- |
-| `google-colab-cli` (`colab`) | `uv tool` (global) | Provision/exec/teardown Colab VMs headlessly |
-| `hf` CLI | `uv tool` (global) | Hub auth, model/dataset search, upload/download |
-| `.mcp.json` | this repo | `huggingface` (remote MCP, Hub search/jobs/docs) + `colab-mcp` (browser-session bridge) |
-| skills | `~/.zcode/skills/{colab-training,colab-cli,hf-cli}` + `.agents/skills/` | Agent know-how; repo copy in `skills/` is source of truth |
-| `.env` → `~/.bashrc` | this repo | `HF_TOKEN`, GPU tier, training defaults (gitignored) |
-| `training/train_sft.py` | this repo | Self-contained QLoRA/SFT script that runs on the VM |
-| `scripts/launch.sh` | this repo | Env-inject + `colab run` ephemeral job launcher |
+| [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli) | **Google's official open-source CLI** for driving consumer Colab runtimes headlessly (provision, exec, files, teardown) | Free (Apache-2.0) |
+| **Google Colab subscription** | The actual GPUs. Free tier, **Pro ($9.99/mo)**, or **Pro+ ($49.99/mo)** — billed in *compute units* (CUs) | Your CUs — see caps below |
+| [`hf` CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli) + **HF Hub** | Model/dataset source of truth: base models in, trained adapters/datasets out | Free; a free HF account with a **write** token |
+| `colab-mcp` (Google) + HF MCP server | Optional MCP bridges for interactive agents | Free |
 
-Update both CLIs anytime with `make update`; refresh skills after updates with
-`make skills-install`.
+That's the whole stack — no cloud accounts beyond Google + Hugging Face, no
+service accounts, no GCP project, no billing APIs. If you have a Colab
+subscription and an HF account, you have everything.
 
-## One-time auth (the only manual steps)
+## Usage caps — read this before launching
 
-### 1. Hugging Face
+**Colab compute units (the real currency):**
 
-```bash
-make auth-hf
-```
+| Plan | Price | CUs included | Notes |
+| --- | --- | --- | --- |
+| Free | $0 | none (dynamic quotas) | T4 "when available", short sessions, no guarantee |
+| **Pro** | $9.99/mo | **~100 CU/mo** | T4/L4 access, up to 24 h runtimes |
+| **Pro+** | $49.99/mo | **~500 CU/mo** | A100 priority, background execution |
 
-Prints a URL + code (hf.co/oauth/device). Approve in the browser; the CLI
-stores the token. Alternatively paste a token with **write** scope from
-<https://huggingface.co/settings/tokens> into `.env` as `HF_TOKEN=`.
+**Approximate burn rates** (as of late 2026 — check Colab's signup page; high-RAM variants burn more):
 
-### 2. Google Colab (same account as your Colab Pro subscription)
+| GPU | VRAM | ~CU/hour | ~hours on a Pro 100 CU |
+| --- | --- | --- | --- |
+| T4 | 16 GB | ~1.2 | ~84 h |
+| L4 | 24 GB | ~1.7 | ~58 h |
+| A100 | 40 GB | ~5.4 | ~18 h |
+| A100 | 80 GB | ~8.5+ | ~12 h |
 
-```bash
-make auth-colab
-```
+Practical rules baked into this repo:
 
-Runs `gcloud auth application-default login` with the four scopes the Colab
-backend requires (`colaboratory`, `userinfo.email`, `cloud-platform`,
-`openid`). One-time; ADC refreshes thereafter. The alternative `oauth2` mode
-(`colab --auth oauth2 ...`) does a browser consent + code paste and caches to
-`~/.config/colab-cli/token.json` — fine for humans, ADC is better for agents.
+- **Iterate on T4, finish on bigger.** A full QLoRA run of a 0.5B model on 500
+  examples took 2.2 min on a T4 (~0.04 CU). A 7B/8B QLoRA (e.g. Llama-3.1-8B,
+  Qwen3-8B) fits a T4 at ~2–8 h ≈ 3–10 CU. Reserve A100 for models >14B.
+- **Ephemeral by default:** `make train` provisions a fresh VM and tears it
+  down automatically, even on failure. An *idle* VM burns CUs forever (up to a
+  24 h hard cap), so `colab stop` / `make stop` is the habit that saves you.
+- **GPU availability is dynamic** — paying doesn't guarantee a GPU. If
+  `colab new` 400s, fall back to T4/CPU or retry later (the skill's failure
+  playbook covers this).
+- **Hugging Face side:** free accounts can push adapters fine; large private
+  model repos are limited by [HF storage quotas](https://huggingface.co/docs/hub/storage-limits).
+  The HF token needs **write** scope (read-only tokens can't push).
 
-Check everything: `make auth-status`.
-
-> **Note:** the `hf` MCP server in `.mcp.json` reads `${HF_TOKEN}` — start
-> ZCode from a shell **after** auth (the `~/.bashrc` block exports it), or the
-> Hub MCP tools will 401. The settings page at
-> <https://huggingface.co/settings/mcp> can generate a client-specific snippet
-> if you prefer a dedicated MCP token.
-
-## Usage
-
-### Smoke test (≈1 min, 1 compute unit or less)
+## Quickstart (two auths, then train)
 
 ```bash
-make smoke        # fresh T4: CUDA check, TFLOPS matmul, Hub connectivity, teardown
+make setup          # installs local deps + skills; creates .env from example
+make auth-hf        # Hugging Face: opens hf.co/oauth/device, approve in browser
+make auth-colab     # Google: approve with your Colab account (same one as your subscription)
+make auth-status    # both should be green
+make smoke          # ~1 min on a T4: CUDA check, Hub connectivity, auto-teardown
 ```
 
-### Train (QLoRA SFT)
-
-1. Edit `.env`: `DATASET_REPO` (a HF dataset with `text` or `messages`
-   column), `OUTPUT_REPO` (e.g. `yourname/qwen3-1.7b-qlora-mytask`),
-   optionally `BASE_MODEL` / `EPOCHS` / `PER_DEVICE_BATCH` / `COLAB_DEFAULT_GPU`.
-2. ```bash
-   make train                  # ephemeral: fresh VM → train → push → teardown
-   make train-keep             # keep the VM for inspection (stop it after!)
-   TRAIN_ARGS="--epochs=2 --batch=4" make train   # one-off overrides
-   ```
-3. Training logs stream live. The final `[train] RESULT {...}` line carries
-   the pushed adapter URL.
-
-To get a quick SFT dataset up: put a `train.jsonl` (one record per line, with
-`{"text": "..."}` or `{"messages": [{"role": ..., "content": ...}, ...]}`)
-into a folder and run `hf upload yourname/my-sft-data ./folder --repo-type dataset`.
-
-### Persistent sessions / manual driving
+Then set `DATASET_REPO` + `OUTPUT_REPO` in `.env` and:
 
 ```bash
-make sessions               # list VMs
-colab --auth adc new -s dev --gpu L4
-colab --auth adc exec -s dev -f training/train_sft.py   # kernel state persists across execs
-colab --auth adc status -s dev
-colab --auth adc stop -s dev    # idle VMs burn compute units — always stop!
+make train          # QLoRA SFT: fresh GPU VM → train → push adapter to HF → teardown
 ```
 
-### Pulling artifacts locally
+Any HF dataset with a `text` column or a `messages` (chat) column works. To
+make one: `hf upload yourname/my-data ./folder --repo-type dataset` (JSONL of
+`{"text": "..."}` or `{"messages": [{"role": ..., "content": ...}, ...]}`).
+Config knobs (model, epochs, LR, batch, GPU tier, timeout) all live in
+`.env` with comments — see [`.env.example`](.env.example).
+
+`BASE_MODEL` can be **any causal-LM on the Hub** (Qwen, Llama, Gemma, Mistral…).
+Default script does 4-bit QLoRA; `TRAIN_ARGS="--full" make train` does full
+fine-tuning if the GPU is big enough.
+
+## Multiple Google accounts (parallel runs)
+
+Each Colab account gets its own credentials + isolated session state, so you
+can run **one project per account, concurrently** — useful because GPU
+availability and CU budgets are per-account:
 
 ```bash
-hf download yourname/qwen3-1.7b-qlora-mytask --local-dir runs/mytask
+make account-adopt LABEL=pro EMAIL=you@gmail.com   # register your current login
+make account-add LABEL=alt1 EMAIL=other@gmail.com  # add another account (browser consent)
+make account-list        # all registered accounts
+make account-status      # live VMs per account
+COLAB_ACCOUNT=alt1 make train   # run under a specific account
 ```
 
-## Agent integration notes
+Every launch is logged to `runs/runlog.jsonl` (timestamp, account, GPU,
+exit) so you always know which account spent what.
 
-- The **colab-training** skill (see `skills/colab-training/SKILL.md`) encodes
-  the full runbook: pre-flight auth check → smoke → launch → monitor →
-  artifact push/pull → teardown. Agents should follow it for any training ask.
-- `hf` CLI auto-detects agent callers (`--format agent`), and `--json` is
-  available on nearly every subcommand for parseable output.
-- **Cost rule:** every provisioned VM must end with `colab stop` unless
-  launched via plain `make train` (self-teardown). Agents are told to check
-  `colab sessions` before finishing any task.
-- GPU entitlements are tier-gated. T4 is the safe default; if `colab new`
-  returns 400 for an accelerator, fall back (the skill's failure playbook
-  covers the rest).
-- Two upstream gotchas already worked around here: colab-cli 0.6.0 breaks with
-  jupyter-kernel-client 1.x (pinned to 0.15.0 via `make update`), and
-  `colab run`'s execution timeout defaults to 30s (`launch.sh` passes
-  `--timeout` from `COLAB_RUN_TIMEOUT`, default 4h).
+**Honest ToS note:** Google's Colab terms disallow using multiple accounts to
+*evade usage limits*. Running genuinely separate projects on separate accounts
+you own is normal usage; systematic quota-evasion risks suspension. Your call.
 
-## Multi-account rotation
-
-`make auth-colab` writes a **single default ADC slot** — re-running it
-*overwrites* (never stacks). For multiple Google accounts, each account gets
-an isolated credentials file + session state via `scripts/accounts.sh`:
+## Daily driving
 
 ```bash
-make account-adopt LABEL=pro EMAIL=you@gmail.com   # register the current login (done for 'pro')
-make account-add LABEL=alt1 EMAIL=other@gmail.com  # browser login for another account
-make account-list                                  # registered accounts
-make account-status                                # live Colab sessions per account
-COLAB_ACCOUNT=alt1 make train                       # run as a specific account
-COLAB_ACCOUNT=alt1 make sessions                   # manual commands too (via scripts/env.sh)
+make sessions / make status / make logs   # what's running
+make stop                                 # release the active VM (do this!)
+hf download yourname/your-adapter --local-dir runs/   # pull artifacts locally
 ```
 
-Mechanics: per-account ADC files live under
-`~/.config/colab-training/gcloud/<label>/`, selected via the
-`GOOGLE_APPLICATION_CREDENTIALS` env var (honored by `google.auth.default()`,
-the keep-alive daemon inherits it); session state is isolated with
-`--config ~/.config/colab-training/state/<label>.json`. Every `make train`
-launch appends a line to `runs/runlog.jsonl` (`{ts, account, gpu, mode,
-exit}`) so you can see which account has been spending.
+## Agent integration
 
-Practical notes: keep the **Pro account as the default** for real runs (compute
-units + A100/L4 entitlements); free accounts are T4-at-best and often
-CPU-only, with shorter sessions and dynamic availability. Also be aware
-Google's Colab terms explicitly disallow using multiple accounts to evade
-usage limits — rotating between accounts you genuinely use for different
-projects is normal; systematic quota-evasion rotation risks account
-suspension. Decide accordingly.
+Skills are installed machine-wide by `make setup` (`make skills-install` to
+re-sync): **`colab-training`** (the full runbook: pre-flight → launch →
+monitor → push → teardown, failure playbook, multi-account rotation),
+**`colab-cli`** (Google's official skill), **`hf-cli`** (HF's official skill) —
+into `~/.zcode/skills`, `~/.agents/skills`, and `~/.claude/skills`. MCP
+servers (`huggingface`, `colab-mcp`) are configured in
+[`.mcp.json`](.mcp.json). `hf` auto-detects agent callers; nearly every
+subcommand has `--json`.
+
+## Troubleshooting
+
+Two upstream gotchas are already handled here (documented so you can fix
+elsewhere): colab-cli 0.6.0 needs `jupyter-kernel-client==0.15.0` pinned
+(`make update` re-applies it), and `colab run`'s execution timeout defaults to
+30 s (`launch.sh` passes `--timeout` from `COLAB_RUN_TIMEOUT`, default 4 h).
+403s against `colab.pa.googleapis.com` mean your Google token lacks the
+`colaboratory` scope → re-run `make auth-colab`. OOM → lower
+`PER_DEVICE_BATCH`, raise `GRAD_ACCUM`, shorter `MAX_LENGTH`. HF 401 on push →
+token needs write scope.
 
 ## Repo layout
 
 ```
 .mcp.json                  MCP servers (huggingface, colab-mcp)
 .env / .env.example        tokens + training defaults (never commit .env)
-Makefile                   setup | auth-* | smoke | train | sessions | stop
-scripts/env.sh             .env loader + VM env-header generator
-scripts/launch.sh          composite-script builder + colab run launcher
-scripts/smoke_test.py      GPU/Hub connectivity check (also shebang-runnable)
-scripts/auth-status.sh     auth state report
-scripts/install-skills.sh  (re)install agent skills
-training/train_sft.py      the QLoRA/SFT trainer that runs on the VM
-training/requirements-colab.txt   VM-side pins (embedded in train_sft.py too)
-skills/colab-training/     canonical agent skill (installed to ~/.zcode/skills)
-runs/                      local artifacts (gitignored)
+Makefile                   setup | auth-* | smoke | train | sessions | stop | account-*
+scripts/                   launcher, multi-account registry, OAuth onboarding, installers
+training/train_sft.py      self-contained QLoRA/SFT trainer that runs ON the VM
+skills/colab-training/     canonical agent skill (installed to all agent dirs)
+runs/                      local artifacts + runlog (gitignored)
 ```
+
+## Disclaimer
+
+Personal project. Not affiliated with or endorsed by Google or Hugging Face.
+`google-colab-cli` and `colab-mcp` are Google open-source projects, but Colab
+is a consumer product: no SLA, runtimes can be preempted, and its terms of
+service govern your usage — including the multi-account note above. Training
+quality is on you; this repo automates plumbing, not judgment.
